@@ -10,20 +10,29 @@ from rtc import RTC
 import secret  # Contains OPENWEATHERMAP_API_KEY, WIFI_SSID, WIFI_PASSWORD
 from adafruit_magtag.magtag import MagTag
 
-# ------------------------------
-# Utility Functions
-# ------------------------------
+# -------------------------------------------------
+# Configuration
+# -------------------------------------------------
+CITY = "Chicago"      # Change to your preferred city
+TZ_OFFSET = -6        # Timezone offset from UTC (e.g., -6 for CST, -5 for CDT)
+TIME_UPDATE_INTERVAL = 60    # Update displayed time every 60 seconds
+WEATHER_UPDATE_INTERVAL = 300  # Fetch/update weather every 5 minutes
+
+# -------------------------------------------------
+# Modular Functions
+# -------------------------------------------------
 def connect_to_wifi():
     """Connect to Wi-Fi using credentials in secret.py."""
     print("Connecting to WiFi...")
     wifi.radio.connect(secret.WIFI_SSID, secret.WIFI_PASSWORD)
     print("Connected to WiFi!")
 
-def sync_time(pool, tz_offset=-6):
+def sync_time(pool, tz_offset):
     """
     Sync the microcontroller's RTC with an NTP server.
     tz_offset: Timezone offset from UTC (e.g., -6 for CST, -5 for CDT).
     """
+    print("Syncing time via NTP...")
     ntp = adafruit_ntp.NTP(pool, tz_offset=tz_offset)
     RTC().datetime = ntp.datetime
     print("Time synced via NTP!")
@@ -52,7 +61,6 @@ def format_weather(data, city):
     """
     temp = data["main"]["temp"]
     description = data["weather"][0]["description"]
-    # Everything after the comma goes on a new line
     return "Weather in {}: {}°F,\n{}".format(city, temp, description)
 
 def format_datetime(now):
@@ -77,72 +85,80 @@ def format_datetime(now):
         hour_12 = 12
     am_pm = "AM" if now.tm_hour < 12 else "PM"
 
-    # Combine into one line
     return "{}, {} {} {}, {}:{:02d} {}".format(
         weekday_str, month_str, day, year, hour_12, now.tm_min, am_pm
     )
 
-def display_data(datetime_str, weather_str):
-    """
-    Display the date/time and weather strings on the MagTag.
-    Adjust text_position or fonts as needed.
-    """
+def update_time_display(magtag, date_index):
+    """Update only the date/time text on the display using the RTC."""
+    now = time.localtime()
+    datetime_str = format_datetime(now)
+    magtag.set_text(datetime_str, date_index)
+    magtag.refresh()
+
+def update_weather_display(magtag, weather_index, session, city, api_key):
+    """Fetch and update the weather text on the display."""
+    data = fetch_weather(session, city, api_key)
+    weather_str = format_weather(data, city)
+    magtag.set_text(weather_str, weather_index)
+    magtag.refresh()
+
+# -------------------------------------------------
+# Main Program Flow
+# -------------------------------------------------
+def main():
+    # 1. Connect to Wi-Fi
+    connect_to_wifi()
+
+    # 2. Create a socket pool and sync time
+    pool = socketpool.SocketPool(wifi.radio)
+    sync_time(pool, TZ_OFFSET)
+
+    # 3. Create an HTTP session
+    session = adafruit_requests.Session(pool, ssl.create_default_context())
+
+    # 4. Set up the MagTag display & text fields
     magtag = MagTag()
 
-    # 1) Date/Time in smaller font
-    datetime_index = magtag.add_text(
+    # Index for date/time (small font)
+    date_index = magtag.add_text(
         text_font="/fonts/Arial-Bold-12.bdf",
         text_position=(10, 10),
         text_color=0x000000,
     )
 
-    # 2) Weather info in larger font, further down
+    # Index for weather (larger font)
     weather_index = magtag.add_text(
         text_font="/fonts/Helvetica-Bold-16.bdf",
         text_position=(10, 50),
         text_color=0x000000,
     )
 
-    magtag.set_text(datetime_str, datetime_index)
-    magtag.set_text(weather_str, weather_index)
-    magtag.refresh()
+    # 5. Initial data display
+    # Update weather first so we have something on the display
+    update_weather_display(magtag, weather_index, session, CITY, secret.OPENWEATHERMAP_API_KEY)
+    update_time_display(magtag, date_index)
 
-# ------------------------------
-# Main Program Flow
-# ------------------------------
-def main():
-    # Connect to Wi-Fi
-    connect_to_wifi()
+    # Track last update times (monotonic seconds)
+    last_time_update = time.monotonic()
+    last_weather_update = time.monotonic()
 
-    # Create a socket pool
-    pool = socketpool.SocketPool(wifi.radio)
+    # 6. Loop forever, updating time & weather on different schedules
+    while True:
+        current = time.monotonic()
 
-    # Sync time via NTP (adjust tz_offset for your time zone)
-    sync_time(pool, tz_offset=-6)
+        # Update time every 60 seconds
+        if current - last_time_update >= TIME_UPDATE_INTERVAL:
+            update_time_display(magtag, date_index)
+            last_time_update = current
 
-    # Create an HTTP session
-    session = adafruit_requests.Session(pool, ssl.create_default_context())
+        # Update weather every 5 minutes
+        if current - last_weather_update >= WEATHER_UPDATE_INTERVAL:
+            update_weather_display(magtag, weather_index, session, CITY, secret.OPENWEATHERMAP_API_KEY)
+            last_weather_update = current
 
-    # Fetch weather data
-    city = "Chicago"  # Change if desired
-    data = fetch_weather(session, city, secret.OPENWEATHERMAP_API_KEY)
+        # Small sleep to avoid busy-waiting
+        time.sleep(1)
 
-    # Format the weather string
-    weather_str = format_weather(data, city)
-
-    # Get the current local time
-    now = time.localtime()
-
-    # Format the date/time
-    datetime_str = format_datetime(now)
-
-    # Display everything on the MagTag
-    display_data(datetime_str, weather_str)
-
-    # Keep the display on screen for 10 seconds (or longer if you wish)
-    time.sleep(10)
-
-# Run the main function when the code starts
+# Run the main function at startup
 main()
-
-
