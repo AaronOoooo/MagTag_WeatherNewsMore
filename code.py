@@ -1,160 +1,89 @@
 import time
+import adafruit_ntp
+from rtc import RTC
 import board
-import displayio
-from adafruit_display_text import label
-import terminalio
 import wifi
 import socketpool
-import adafruit_ntp
-import rtc
-import secrets
+import ssl
+import adafruit_requests as requests
+import secret  # Contains your OPENWEATHERMAP_API_KEY, WIFI_SSID, and WIFI_PASSWORD
 
-# Month names for formatting the date
-MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+from adafruit_magtag.magtag import MagTag
 
-def compute_yearday(year, month, day):
-    """Compute the day of the year (1-366)."""
-    month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)):
-        month_days[1] = 29
-    return sum(month_days[:month - 1]) + day
+# Custom text wrap function that breaks text into lines of a given character width.
+def wrap_text(text, width):
+    words = text.split(" ")
+    lines = []
+    current_line = ""
+    for word in words:
+        if current_line:
+            test_line = current_line + " " + word
+        else:
+            test_line = word
+        # If adding the next word exceeds the width, wrap to a new line.
+        if len(test_line) > width:
+            if current_line:  # Only add if there's already content
+                lines.append(current_line)
+            current_line = word  # Start a new line with the current word
+        else:
+            current_line = test_line
+    if current_line:
+        lines.append(current_line)
+    return "\n".join(lines)
 
-def is_dst(year, month, day, hour):
-    """Determine if Daylight Saving Time (DST) is in effect for Chicago, IL."""
-    march_first = time.mktime((year, 3, 1, 0, 0, 0, 0, 0, 0))
-    march_first_weekday = time.localtime(march_first).tm_wday
-    first_sunday = 1 + ((6 - march_first_weekday) % 7)
-    second_sunday = first_sunday + 7
-    dst_start = time.mktime((year, 3, second_sunday, 2, 0, 0, 0, 0, 0))
+# ------------------------------
+# Step 1: Connect to WiFi
+# ------------------------------
+print("Connecting to WiFi...")
+wifi.radio.connect(secret.WIFI_SSID, secret.WIFI_PASSWORD)
+print("Connected to WiFi!")
 
-    november_first = time.mktime((year, 11, 1, 0, 0, 0, 0, 0, 0))
-    november_first_weekday = time.localtime(november_first).tm_wday
-    first_sunday_nov = 1 + ((6 - november_first_weekday) % 7)
-    dst_end = time.mktime((year, 11, first_sunday_nov, 2, 0, 0, 0, 0, 0))
+# ------------------------------
+# Step 2: Set Up HTTP Session
+# ------------------------------
+pool = socketpool.SocketPool(wifi.radio)
+http = requests.Session(pool, ssl.create_default_context())
 
-    current = time.mktime((year, month, day, hour, 0, 0, 0, 0, 0))
-    return dst_start <= current < dst_end
+# ------------------------------
+# Step 3: Fetch Weather Data
+# ------------------------------
+city = "Chicago"  # Change to your desired city
+url = "http://api.openweathermap.org/data/2.5/weather?q={}&appid={}&units=imperial".format(
+    city, secret.OPENWEATHERMAP_API_KEY
+)
 
-def connect_wifi(ssid, password):
-    """Connect to WiFi and return the assigned IP address."""
-    print("Connecting to WiFi...")
-    wifi.radio.connect(ssid, password)
-    ip_address = wifi.radio.ipv4_address
-    print("Connected, IP address:", ip_address)
-    return ip_address
+print("Fetching weather data...")
+response = http.get(url)
+data = response.json()
+response.close()
 
-def setup_time():
-    """Get the UTC time via NTP, adjust it for Central Time (CST/CDT), and set the RTC."""
-    pool = socketpool.SocketPool(wifi.radio)
-    ntp = adafruit_ntp.NTP(pool, tz_offset=0)
+# Extract weather details
+temp = data["main"]["temp"]
+weather_description = data["weather"][0]["description"]
+weather_info = "Weather in {}: {}°F, {}".format(city, temp, weather_description)
+print(weather_info)
 
-    # Get NTP time, unpack while safely handling extra values
-    ntp_time = ntp.datetime
-    year, month, day, hour, minute, second, _, weekday, *_ = ntp_time  # Fixed unpacking
+# ------------------------------
+# Step 4: Initialize MagTag Display
+# ------------------------------
+magtag = MagTag()
 
-    # Adjust timezone offset based on DST
-    tz_offset = -5 * 3600 if is_dst(year, month, day, hour) else -6 * 3600
-    adjusted_secs = time.mktime((year, month, day, hour, minute, second, weekday, 0, 0)) + tz_offset
-    adjusted_time = time.localtime(adjusted_secs)
+# Add a text element using the specified font.
+text_index = magtag.add_text(
+    text_font="/fonts/Arial-Bold-12.bdf",
+    text_position=(10, 10),
+    text_color=0x000000,
+    line_spacing=1.0,
+)
 
-    rtc.RTC().datetime = (
-        adjusted_time.tm_year,
-        adjusted_time.tm_mon,
-        adjusted_time.tm_mday,
-        adjusted_time.tm_hour,
-        adjusted_time.tm_min,
-        adjusted_time.tm_sec,
-        adjusted_time.tm_wday,
-        compute_yearday(adjusted_time.tm_year, adjusted_time.tm_mon, adjusted_time.tm_mday),
-        -1
-    )
+# Wrap the weather info to prevent it from getting cut off.
+wrapped_text = wrap_text(weather_info, 25)  # Adjust '25' as needed for your display
 
-def create_display(ip_address):
-    """Create the display and return display object along with label references."""
-    display = board.DISPLAY
-    splash = displayio.Group()
-    display.root_group = splash
+# Update the text element with the wrapped text.
+magtag.set_text(wrapped_text, text_index)
 
-    background_bitmap = displayio.Bitmap(display.width, display.height, 1)
-    background_palette = displayio.Palette(1)
-    background_palette[0] = 0xFFFFFF
-    background_sprite = displayio.TileGrid(background_bitmap, pixel_shader=background_palette)
-    splash.append(background_sprite)
+# Refresh the display to show the updated text.
+magtag.refresh()
 
-    greeting = label.Label(terminalio.FONT, text="Hello, MagTag!", color=0x000000)
-    greeting.scale = 2
-    greeting.anchor_point = (0.5, 0.5)
-    greeting.anchored_position = (display.width // 2, display.height // 2 - 40)
-    splash.append(greeting)
-
-    ip_label = label.Label(terminalio.FONT, text="IP: " + str(ip_address), color=0x000000)
-    ip_label.scale = 2
-    ip_label.anchor_point = (0.5, 0.5)
-    ip_label.anchored_position = (display.width // 2, display.height // 2 - 10)
-    splash.append(ip_label)
-
-    date_label = label.Label(terminalio.FONT, text="Date: --- --, ----", color=0x000000)
-    date_label.scale = 2
-    date_label.anchor_point = (0.5, 0.5)
-    date_label.anchored_position = (display.width // 2, display.height // 2 + 20)
-    splash.append(date_label)
-
-    time_label = label.Label(terminalio.FONT, text="Time: --:--", color=0x000000)
-    time_label.scale = 2
-    time_label.anchor_point = (0.5, 0.5)
-    time_label.anchored_position = (display.width // 2, display.height // 2 + 50)
-    splash.append(time_label)
-
-    display.refresh()
-    return display, date_label, time_label
-
-def update_display_time(display, date_label, time_label):
-    """Update the date and time labels on the display."""
-    current_datetime = rtc.RTC().datetime
-    year, month, day, hour, minute = current_datetime[0], current_datetime[1], current_datetime[2], current_datetime[3], current_datetime[4]
-
-    month_name = MONTH_NAMES[month - 1]
-    date_label.text = "Date: {}, {} {}".format(month_name, day, year)
-
-    if hour == 0:
-        hours_12 = 12
-        meridiem = "AM"
-    elif hour < 12:
-        hours_12 = hour
-        meridiem = "AM"
-    elif hour == 12:
-        hours_12 = 12
-        meridiem = "PM"
-    else:
-        hours_12 = hour - 12
-        meridiem = "PM"
-
-    time_label.text = "Time: {:02d}:{:02d} {}".format(hours_12, minute, meridiem)
-
-    refreshed = False
-    while not refreshed:
-        try:
-            display.refresh()
-            refreshed = True
-        except RuntimeError as e:
-            if "Refresh too soon" in str(e):
-                print("Refresh too soon; waiting 5 seconds before retrying.")
-                time.sleep(5)
-            else:
-                raise e
-
-def main():
-    ssid = secrets.secrets["ssid"]
-    password = secrets.secrets["password"]
-
-    ip_address = connect_wifi(ssid, password)
-    setup_time()
-
-    display, date_label, time_label = create_display(ip_address)
-
-    while True:
-        update_display_time(display, date_label, time_label)
-        time.sleep(60)
-
-main()
+# Optional: Pause to allow time to read the display.
+time.sleep(10)
