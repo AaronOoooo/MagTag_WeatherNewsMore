@@ -15,9 +15,9 @@ from adafruit_magtag.magtag import MagTag
 # -------------------------------------------------
 CITY = "Chicago"      
 TZ_OFFSET = -6        
-TIME_UPDATE_INTERVAL = 60    # Update time every 60 seconds
-WEATHER_UPDATE_INTERVAL = 300  # Update weather every 5 minutes
-FORECAST_UPDATE_INTERVAL = 1800  # Update forecast every 30 minutes
+TIME_UPDATE_INTERVAL = 60       # Update time every 60 seconds
+WEATHER_UPDATE_INTERVAL = 300   # Update weather every 5 minutes
+FORECAST_UPDATE_INTERVAL = 1800 # Update forecast every 30 minutes
 
 # -------------------------------------------------
 # Initialize MagTag
@@ -33,19 +33,20 @@ forecast_str = ""
 # -------------------------------------------------
 # Text Fields
 # -------------------------------------------------
-# Header (shared between views)
+# Header (shared between views) - moved further up
 header_index = magtag.add_text(
     text_font="/fonts/Arial-Bold-12.bdf",
-    text_position=(10, 10),
+    text_position=(5, 0),   # Adjust to move closer to the top
     text_color=0x000000,
 )
 
-# Content (weather or forecast)
+# Content (weather or forecast) - reduced line spacing
 content_index = magtag.add_text(
     text_font="/fonts/Arial-12.bdf",
-    text_position=(10, 30),
+    text_position=(5, 60),  # Start content a bit lower so it doesn't clash
     text_color=0x000000,
-    line_spacing=12,  # Reduce spacing between lines
+    line_spacing=0.7,        # Less spacing between lines
+    text_wrap=28,            # Wrap text at ~28 characters per line
 )
 
 # -------------------------------------------------
@@ -87,31 +88,27 @@ def format_weather(data, city):
     temp = data["main"]["temp"]
     temp_max = data["main"]["temp_max"]
     temp_min = data["main"]["temp_min"]
+    feels_like = data["main"]["feels_like"]
     humidity = data["main"]["humidity"]
     wind_speed = data["wind"]["speed"]
-    wind_deg = data["wind"]["deg"]
-    
-    # Wind direction logic (fixed)
-    wind_dir = "N"
-    if 22.5 <= wind_deg < 67.5:
-        wind_dir = "NE"
-    elif 67.5 <= wind_deg < 112.5:
-        wind_dir = "E"
-    elif 112.5 <= wind_deg < 157.5:
-        wind_dir = "SE"
-    elif 157.5 <= wind_deg < 202.5:
-        wind_dir = "S"
-    elif 202.5 <= wind_deg < 247.5:
-        wind_dir = "SW"
-    elif 247.5 <= wind_deg < 292.5:
-        wind_dir = "W"
-    elif 292.5 <= wind_deg < 337.5:
-        wind_dir = "NW"
+    sunrise = time.localtime(data["sys"]["sunrise"])
+    sunset = time.localtime(data["sys"]["sunset"])
+
+    # Format sunrise and sunset times
+    sunrise_time = "{}:{:02d} AM".format(sunrise.tm_hour, sunrise.tm_min)
+    # Convert sunset hour to 12-hour format
+    sunset_hour_12 = sunset.tm_hour - 12 if sunset.tm_hour > 12 else sunset.tm_hour
+    if sunset_hour_12 == 0:
+        sunset_hour_12 = 12
+    sunset_am_pm = "PM" if sunset.tm_hour >= 12 else "AM"
+    sunset_time = "{}:{:02d} {}".format(sunset_hour_12, sunset.tm_min, sunset_am_pm)
 
     return (
         "Weather in {}: {}°F\n".format(city, temp) +
         "High: {}°F, Low: {}°F\n".format(temp_max, temp_min) +
-        "Humidity: {}%, Wind: {} mph {}".format(humidity, wind_speed, wind_dir)
+        "Feels like: {}°F\n".format(feels_like) +
+        "Humidity: {}%, Wind: {} mph\n".format(humidity, wind_speed) +
+        "Sunrise: {}, Sunset: {}".format(sunrise_time, sunset_time)
     )
 
 def format_forecast(data):
@@ -119,7 +116,7 @@ def format_forecast(data):
     forecast_str = ""
     weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     for entry in data["list"][:5]:  # First 5 entries
-        date = time.localtime(entry["dt"])  # Fixed: Removed extra parenthesis
+        date = time.localtime(entry["dt"])
         weekday = weekday_names[date.tm_wday]
         temp = entry["main"]["temp"]
         desc = entry["weather"][0]["description"]
@@ -128,8 +125,8 @@ def format_forecast(data):
 
 def format_datetime(now):
     """
-    Given a time.struct_time object, return a string with abbreviated weekday,
-    abbreviated month, day, year, and 12-hour format time with AM/PM.
+    Return a string with abbreviated weekday, abbreviated month, day, year,
+    and 12-hour format time with AM/PM.
     Example: "Tue, Mar 1 2025, 7:05 PM"
     """
     # Abbreviated weekday and month names
@@ -155,7 +152,7 @@ def format_datetime(now):
 def update_display():
     """Refresh the screen based on current view."""
     magtag.set_text("", header_index)  # Clear header
-    magtag.set_text("", content_index)  # Clear content
+    magtag.set_text("", content_index) # Clear content
     
     if current_view == "weather":
         # Show current weather
