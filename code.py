@@ -13,55 +13,118 @@ from adafruit_magtag.magtag import MagTag
 # -------------------------------------------------
 # Configuration
 # -------------------------------------------------
-CITY = "Chicago"      # Change to your preferred city
-TZ_OFFSET = -6        # Timezone offset from UTC (e.g., -6 for CST, -5 for CDT)
-TIME_UPDATE_INTERVAL = 60    # Update displayed time every 60 seconds
-WEATHER_UPDATE_INTERVAL = 300  # Fetch/update weather every 5 minutes
+CITY = "Chicago"      
+TZ_OFFSET = -6        
+TIME_UPDATE_INTERVAL = 60    # Update time every 60 seconds
+WEATHER_UPDATE_INTERVAL = 300  # Update weather every 5 minutes
+FORECAST_UPDATE_INTERVAL = 1800  # Update forecast every 30 minutes
+
+# -------------------------------------------------
+# Initialize MagTag
+# -------------------------------------------------
+magtag = MagTag()
+current_view = "weather"  # Start with current weather
+last_weather_update = last_forecast_update = time.monotonic()
+
+# Initialize weather and forecast strings
+weather_str = ""
+forecast_str = ""
+
+# -------------------------------------------------
+# Text Fields
+# -------------------------------------------------
+# Header (shared between views)
+header_index = magtag.add_text(
+    text_font="/fonts/Arial-Bold-12.bdf",
+    text_position=(10, 10),
+    text_color=0x000000,
+)
+
+# Content (weather or forecast)
+content_index = magtag.add_text(
+    text_font="/fonts/Arial-12.bdf",
+    text_position=(10, 30),
+    text_color=0x000000,
+    line_spacing=12,  # Reduce spacing between lines
+)
 
 # -------------------------------------------------
 # Modular Functions
 # -------------------------------------------------
 def connect_to_wifi():
-    """Connect to Wi-Fi using credentials in secret.py."""
+    """Connect to Wi-Fi."""
     print("Connecting to WiFi...")
     wifi.radio.connect(secret.WIFI_SSID, secret.WIFI_PASSWORD)
-    print("Connected to WiFi!")
+    print("Connected!")
 
-def sync_time(pool, tz_offset):
-    """
-    Sync the microcontroller's RTC with an NTP server.
-    tz_offset: Timezone offset from UTC (e.g., -6 for CST, -5 for CDT).
-    """
-    print("Syncing time via NTP...")
-    ntp = adafruit_ntp.NTP(pool, tz_offset=tz_offset)
+def sync_time(pool):
+    """Sync time via NTP."""
+    print("Syncing time...")
+    ntp = adafruit_ntp.NTP(pool, tz_offset=TZ_OFFSET)
     RTC().datetime = ntp.datetime
-    print("Time synced via NTP!")
+    print("Time synced!")
 
 def fetch_weather(session, city, api_key):
-    """
-    Fetch current weather data from OpenWeatherMap for the given city and API key.
-    Returns the parsed JSON data.
-    """
-    url = (
-        "http://api.openweathermap.org/data/2.5/weather?"
-        "q={}&appid={}&units=imperial".format(city, api_key)
-    )
-    print("Fetching weather data from OpenWeatherMap...")
+    """Fetch current weather data."""
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=imperial"
+    print("Fetching weather...")
+    response = session.get(url)
+    data = response.json()
+    response.close()
+    return data
+
+def fetch_forecast(session, city, api_key):
+    """Fetch 5-day forecast data."""
+    url = f"http://api.openweathermap.org/data/2.5/forecast?q={city}&appid={api_key}&units=imperial"
+    print("Fetching forecast...")
     response = session.get(url)
     data = response.json()
     response.close()
     return data
 
 def format_weather(data, city):
-    """
-    Given the weather JSON data and city name, return a multi-line weather string.
-    Example:
-      Weather in Chicago: 44°F,
-      broken clouds
-    """
+    """Format current weather into a string."""
     temp = data["main"]["temp"]
-    description = data["weather"][0]["description"]
-    return "Weather in {}: {}°F,\n{}".format(city, temp, description)
+    temp_max = data["main"]["temp_max"]
+    temp_min = data["main"]["temp_min"]
+    humidity = data["main"]["humidity"]
+    wind_speed = data["wind"]["speed"]
+    wind_deg = data["wind"]["deg"]
+    
+    # Wind direction logic (fixed)
+    wind_dir = "N"
+    if 22.5 <= wind_deg < 67.5:
+        wind_dir = "NE"
+    elif 67.5 <= wind_deg < 112.5:
+        wind_dir = "E"
+    elif 112.5 <= wind_deg < 157.5:
+        wind_dir = "SE"
+    elif 157.5 <= wind_deg < 202.5:
+        wind_dir = "S"
+    elif 202.5 <= wind_deg < 247.5:
+        wind_dir = "SW"
+    elif 247.5 <= wind_deg < 292.5:
+        wind_dir = "W"
+    elif 292.5 <= wind_deg < 337.5:
+        wind_dir = "NW"
+
+    return (
+        "Weather in {}: {}°F\n".format(city, temp) +
+        "High: {}°F, Low: {}°F\n".format(temp_max, temp_min) +
+        "Humidity: {}%, Wind: {} mph {}".format(humidity, wind_speed, wind_dir)
+    )
+
+def format_forecast(data):
+    """Format forecast into a string."""
+    forecast_str = ""
+    weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    for entry in data["list"][:5]:  # First 5 entries
+        date = time.localtime(entry["dt"])  # Fixed: Removed extra parenthesis
+        weekday = weekday_names[date.tm_wday]
+        temp = entry["main"]["temp"]
+        desc = entry["weather"][0]["description"]
+        forecast_str += f"{weekday}: {temp}°F, {desc}\n"
+    return forecast_str
 
 def format_datetime(now):
     """
@@ -89,76 +152,72 @@ def format_datetime(now):
         weekday_str, month_str, day, year, hour_12, now.tm_min, am_pm
     )
 
-def update_time_display(magtag, date_index):
-    """Update only the date/time text on the display using the RTC."""
-    now = time.localtime()
-    datetime_str = format_datetime(now)
-    magtag.set_text(datetime_str, date_index)
-    magtag.refresh()
-
-def update_weather_display(magtag, weather_index, session, city, api_key):
-    """Fetch and update the weather text on the display."""
-    data = fetch_weather(session, city, api_key)
-    weather_str = format_weather(data, city)
-    magtag.set_text(weather_str, weather_index)
+def update_display():
+    """Refresh the screen based on current view."""
+    magtag.set_text("", header_index)  # Clear header
+    magtag.set_text("", content_index)  # Clear content
+    
+    if current_view == "weather":
+        # Show current weather
+        magtag.set_text(format_datetime(time.localtime()), header_index)
+        magtag.set_text(weather_str, content_index)
+    else:
+        # Show forecast
+        magtag.set_text("5-Day Forecast", header_index)
+        magtag.set_text(forecast_str, content_index)
+    
     magtag.refresh()
 
 # -------------------------------------------------
 # Main Program Flow
 # -------------------------------------------------
 def main():
+    global current_view, weather_str, forecast_str, last_weather_update, last_forecast_update
+    
     # 1. Connect to Wi-Fi
     connect_to_wifi()
-
-    # 2. Create a socket pool and sync time
+    
+    # 2. Sync time
     pool = socketpool.SocketPool(wifi.radio)
-    sync_time(pool, TZ_OFFSET)
-
-    # 3. Create an HTTP session
+    sync_time(pool)
+    
+    # 3. Create HTTP session
     session = adafruit_requests.Session(pool, ssl.create_default_context())
-
-    # 4. Set up the MagTag display & text fields
-    magtag = MagTag()
-
-    # Index for date/time (small font)
-    date_index = magtag.add_text(
-        text_font="/fonts/Arial-Bold-12.bdf",
-        text_position=(10, 10),
-        text_color=0x000000,
-    )
-
-    # Index for weather (larger font)
-    weather_index = magtag.add_text(
-        text_font="/fonts/Helvetica-Bold-16.bdf",
-        text_position=(10, 50),
-        text_color=0x000000,
-    )
-
-    # 5. Initial data display
-    # Update weather first so we have something on the display
-    update_weather_display(magtag, weather_index, session, CITY, secret.OPENWEATHERMAP_API_KEY)
-    update_time_display(magtag, date_index)
-
-    # Track last update times (monotonic seconds)
-    last_time_update = time.monotonic()
-    last_weather_update = time.monotonic()
-
-    # 6. Loop forever, updating time & weather on different schedules
+    
+    # 4. Initial data fetch
+    weather_data = fetch_weather(session, CITY, secret.OPENWEATHERMAP_API_KEY)
+    forecast_data = fetch_forecast(session, CITY, secret.OPENWEATHERMAP_API_KEY)
+    weather_str = format_weather(weather_data, CITY)
+    forecast_str = format_forecast(forecast_data)
+    update_display()
+    
+    # 5. Main loop
     while True:
-        current = time.monotonic()
-
-        # Update time every 60 seconds
-        if current - last_time_update >= TIME_UPDATE_INTERVAL:
-            update_time_display(magtag, date_index)
-            last_time_update = current
-
+        current_time = time.monotonic()
+        
+        # Check for button press (leftmost button: Button A)
+        if not magtag.peripherals.buttons[0].value:  # Use index 0 for Button A
+            current_view = "forecast" if current_view == "weather" else "weather"
+            update_display()
+            time.sleep(0.5)  # Debounce
+        
         # Update weather every 5 minutes
-        if current - last_weather_update >= WEATHER_UPDATE_INTERVAL:
-            update_weather_display(magtag, weather_index, session, CITY, secret.OPENWEATHERMAP_API_KEY)
-            last_weather_update = current
+        if current_time - last_weather_update >= WEATHER_UPDATE_INTERVAL:
+            weather_data = fetch_weather(session, CITY, secret.OPENWEATHERMAP_API_KEY)
+            weather_str = format_weather(weather_data, CITY)
+            if current_view == "weather":
+                update_display()
+            last_weather_update = current_time
+        
+        # Update forecast every 30 minutes
+        if current_time - last_forecast_update >= FORECAST_UPDATE_INTERVAL:
+            forecast_data = fetch_forecast(session, CITY, secret.OPENWEATHERMAP_API_KEY)
+            forecast_str = format_forecast(forecast_data)
+            if current_view == "forecast":
+                update_display()
+            last_forecast_update = current_time
+        
+        time.sleep(0.1)  # Reduce sleep for responsive button presses
 
-        # Small sleep to avoid busy-waiting
-        time.sleep(1)
-
-# Run the main function at startup
+# Run the program
 main()
