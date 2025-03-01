@@ -46,7 +46,7 @@ content_index = magtag.add_text(
     text_position=(5, 60),  # Start content a bit lower so it doesn't clash
     text_color=0x000000,
     line_spacing=0.7,        # Less spacing between lines
-    text_wrap=28,            # Wrap text at ~28 characters per line
+    #text_wrap=35,            # Wrap text at ~28 characters per line
 )
 
 # -------------------------------------------------
@@ -104,7 +104,7 @@ def format_weather(data, city):
     sunset_time = "{}:{:02d} {}".format(sunset_hour_12, sunset.tm_min, sunset_am_pm)
 
     return (
-        "Weather in {}: {}°F\n".format(city, temp) +
+        "{} temp: {}°F\n".format(city, temp) +
         "High: {}°F, Low: {}°F\n".format(temp_max, temp_min) +
         "Feels like: {}°F\n".format(feels_like) +
         "Humidity: {}%, Wind: {} mph\n".format(humidity, wind_speed) +
