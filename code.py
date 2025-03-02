@@ -13,8 +13,8 @@ from adafruit_magtag.magtag import MagTag
 # -------------------------------------------------
 # Configuration
 # -------------------------------------------------
-CITY = "Chicago"      
-TZ_OFFSET = -6        
+CITY = "Chicago"
+TZ_OFFSET = -6
 TIME_UPDATE_INTERVAL = 60       # Update time every 60 seconds
 WEATHER_UPDATE_INTERVAL = 300   # Update weather every 5 minutes
 FORECAST_UPDATE_INTERVAL = 1800 # Update forecast every 30 minutes
@@ -33,20 +33,19 @@ forecast_str = ""
 # -------------------------------------------------
 # Text Fields
 # -------------------------------------------------
-# Header (shared between views) - moved further up
 header_index = magtag.add_text(
     text_font="/fonts/Arial-Bold-12.bdf",
-    text_position=(5, 0),   # Adjust to move closer to the top
+    text_position=(5, 0),    # Adjust to move closer to the top
     text_color=0x000000,
 )
 
-# Content (weather or forecast) - reduced line spacing
 content_index = magtag.add_text(
     text_font="/fonts/Arial-12.bdf",
-    text_position=(5, 60),  # Start content a bit lower so it doesn't clash
+    text_position=(5, 60),   # Start content lower so it doesn't clash with header
     text_color=0x000000,
-    line_spacing=0.7,        # Less spacing between lines
-    #text_wrap=35,            # Wrap text at ~28 characters per line
+    line_spacing=0.7,        # Tighter line spacing
+    # If you don't want automatic wrapping, remove or comment out text_wrap below
+    # text_wrap=28,
 )
 
 # -------------------------------------------------
@@ -75,7 +74,7 @@ def fetch_weather(session, city, api_key):
     return data
 
 def fetch_forecast(session, city, api_key):
-    """Fetch 5-day forecast data."""
+    """Fetch 5-day forecast data (3-hour increments)."""
     url = f"http://api.openweathermap.org/data/2.5/forecast?q={city}&appid={api_key}&units=imperial"
     print("Fetching forecast...")
     response = session.get(url)
@@ -84,13 +83,15 @@ def fetch_forecast(session, city, api_key):
     return data
 
 def format_weather(data, city):
-    """Format current weather into a string."""
-    temp = data["main"]["temp"]
-    temp_max = data["main"]["temp_max"]
-    temp_min = data["main"]["temp_min"]
-    feels_like = data["main"]["feels_like"]
+    """Format current weather into a string with whole-number temps."""
+    # Round each temperature to a whole number
+    temp = round(data["main"]["temp"])
+    temp_max = round(data["main"]["temp_max"])
+    temp_min = round(data["main"]["temp_min"])
+    feels_like = round(data["main"]["feels_like"])
     humidity = data["main"]["humidity"]
-    wind_speed = data["wind"]["speed"]
+    wind_speed = round(data["wind"]["speed"])
+
     sunrise = time.localtime(data["sys"]["sunrise"])
     sunset = time.localtime(data["sys"]["sunset"])
 
@@ -104,7 +105,7 @@ def format_weather(data, city):
     sunset_time = "{}:{:02d} {}".format(sunset_hour_12, sunset.tm_min, sunset_am_pm)
 
     return (
-        "{} temp: {}°F\n".format(city, temp) +
+        "Weather in {}: {}°F\n".format(city, temp) +
         "High: {}°F, Low: {}°F\n".format(temp_max, temp_min) +
         "Feels like: {}°F\n".format(feels_like) +
         "Humidity: {}%, Wind: {} mph\n".format(humidity, wind_speed) +
@@ -112,15 +113,24 @@ def format_weather(data, city):
     )
 
 def format_forecast(data):
-    """Format forecast into a string."""
+    """
+    Format the forecast for the *next five days* using every 8th entry
+    (since the forecast is in 3-hour increments).
+    Show temperatures as whole numbers.
+    """
     forecast_str = ""
     weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    for entry in data["list"][:5]:  # First 5 entries
-        date = time.localtime(entry["dt"])
-        weekday = weekday_names[date.tm_wday]
-        temp = entry["main"]["temp"]
+
+    # The list has 40 entries total (8 per day for 5 days).
+    # We'll pick one entry per day: 0, 8, 16, 24, 32.
+    for i in range(5):
+        entry = data["list"][i * 8]
+        date_struct = time.localtime(entry["dt"])
+        weekday = weekday_names[date_struct.tm_wday]
+        temp = round(entry["main"]["temp"])
         desc = entry["weather"][0]["description"]
         forecast_str += f"{weekday}: {temp}°F, {desc}\n"
+
     return forecast_str
 
 def format_datetime(now):
@@ -129,7 +139,6 @@ def format_datetime(now):
     and 12-hour format time with AM/PM.
     Example: "Tue, Mar 1 2025, 7:05 PM"
     """
-    # Abbreviated weekday and month names
     weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
