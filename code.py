@@ -18,34 +18,39 @@ TZ_OFFSET = -6
 TIME_UPDATE_INTERVAL = 60       # Update time every 60 seconds
 WEATHER_UPDATE_INTERVAL = 300   # Update weather every 5 minutes
 FORECAST_UPDATE_INTERVAL = 1800 # Update forecast every 30 minutes
+NEWS_UPDATE_INTERVAL = 900      # Update news every 15 minutes (900 seconds)
 
 # -------------------------------------------------
 # Initialize MagTag
 # -------------------------------------------------
 magtag = MagTag()
 current_view = "weather"  # Start with current weather
-last_weather_update = last_forecast_update = time.monotonic()
 
-# Initialize weather and forecast strings
+# Keep track of last update times
+last_weather_update = time.monotonic()
+last_forecast_update = time.monotonic()
+last_news_update = time.monotonic()
+
+# Initialize strings
 weather_str = ""
 forecast_str = ""
+news_str = ""
 
 # -------------------------------------------------
 # Text Fields
 # -------------------------------------------------
 header_index = magtag.add_text(
     text_font="/fonts/Arial-Bold-12.bdf",
-    text_position=(5, 0),    # Adjust to move closer to the top
+    text_position=(5, 0),
     text_color=0x000000,
 )
 
 content_index = magtag.add_text(
     text_font="/fonts/Arial-12.bdf",
-    text_position=(5, 60),   # Start content lower so it doesn't clash with header
+    text_position=(5, 60),
     text_color=0x000000,
-    line_spacing=0.7,        # Tighter line spacing
-    # If you don't want automatic wrapping, remove or comment out text_wrap below
-    # text_wrap=28,
+    line_spacing=0.7,
+    # text_wrap=28,  # If you prefer automatic wrapping, uncomment this
 )
 
 # -------------------------------------------------
@@ -82,9 +87,86 @@ def fetch_forecast(session, city, api_key):
     response.close()
     return data
 
+def fetch_headlines(session):
+    """
+    Fetch the first three headlines from lite.cnn.com,
+    replace unsupported glyphs, and wrap long lines.
+    """
+    url = "https://lite.cnn.com/en"
+    print("Fetching headlines from lite.cnn.com...")
+    response = session.get(url)
+    html = response.text
+    response.close()
+
+    # Helper dict to replace fancy punctuation with ASCII
+    replace_map = {
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+        "—": "-",
+        "–": "-",
+        "…": "...",
+    }
+
+    # Simple word-wrapping helper
+    def wrap_text(text, max_chars=28):
+        words = text.split()
+        lines = []
+        current_line = []
+        current_length = 0
+
+        for w in words:
+            # +1 accounts for a space if there's already text in the line
+            if current_length + len(w) + (1 if current_line else 0) > max_chars:
+                lines.append(" ".join(current_line))
+                current_line = [w]
+                current_length = len(w)
+            else:
+                current_line.append(w)
+                # If not empty, add space length too
+                current_length += len(w) + (1 if current_line else 0)
+
+        if current_line:
+            lines.append(" ".join(current_line))
+        return "\n".join(lines)
+
+    headlines = []
+    parts = html.split("<li ")
+    for part in parts[1:]:
+        if "<a href=" not in part:
+            continue
+        a_start = part.find("<a href=")
+        anchor_close = part.find(">", a_start)
+        anchor_end = part.find("</a>", anchor_close)
+        if anchor_close == -1 or anchor_end == -1:
+            continue
+
+        headline = part[anchor_close+1:anchor_end].strip()
+
+        # Skip any “terms” or “privacy” text
+        if "Terms" in headline or "Privacy" in headline:
+            continue
+
+        # Replace curly quotes, dashes, etc.
+        for old_char, new_char in replace_map.items():
+            headline = headline.replace(old_char, new_char)
+
+        # Wrap the text at ~28 characters
+        wrapped = wrap_text(headline, max_chars=38)
+
+        # If it's not empty, store it
+        if len(wrapped) > 5:
+            headlines.append(wrapped)
+
+        if len(headlines) >= 2:
+            break
+
+    # Join them with a blank line between each
+    return "\n\n".join(headlines)
+
 def format_weather(data, city):
     """Format current weather into a string with whole-number temps."""
-    # Round each temperature to a whole number
     temp = round(data["main"]["temp"])
     temp_max = round(data["main"]["temp_max"])
     temp_min = round(data["main"]["temp_min"])
@@ -95,7 +177,7 @@ def format_weather(data, city):
     sunrise = time.localtime(data["sys"]["sunrise"])
     sunset = time.localtime(data["sys"]["sunset"])
 
-    # Format sunrise and sunset times
+    # Format sunrise time
     sunrise_time = "{}:{:02d} AM".format(sunrise.tm_hour, sunrise.tm_min)
     # Convert sunset hour to 12-hour format
     sunset_hour_12 = sunset.tm_hour - 12 if sunset.tm_hour > 12 else sunset.tm_hour
@@ -114,15 +196,12 @@ def format_weather(data, city):
 
 def format_forecast(data):
     """
-    Format the forecast for the *next five days* using every 8th entry
+    Format the forecast for the next five days using every 8th entry
     (since the forecast is in 3-hour increments).
-    Show temperatures as whole numbers.
     """
     forecast_str = ""
     weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-    # The list has 40 entries total (8 per day for 5 days).
-    # We'll pick one entry per day: 0, 8, 16, 24, 32.
     for i in range(5):
         entry = data["list"][i * 8]
         date_struct = time.localtime(entry["dt"])
@@ -148,7 +227,6 @@ def format_datetime(now):
     day = now.tm_mday
     year = now.tm_year
 
-    # Convert to 12-hour format with AM/PM
     hour_12 = now.tm_hour % 12
     if hour_12 == 0:
         hour_12 = 12
@@ -161,52 +239,64 @@ def format_datetime(now):
 def update_display():
     """Refresh the screen based on current view."""
     magtag.set_text("", header_index)  # Clear header
-    magtag.set_text("", content_index) # Clear content
-    
+    magtag.set_text("", content_index)  # Clear content
+
     if current_view == "weather":
-        # Show current weather
         magtag.set_text(format_datetime(time.localtime()), header_index)
         magtag.set_text(weather_str, content_index)
-    else:
-        # Show forecast
+    elif current_view == "forecast":
         magtag.set_text("5-Day Forecast", header_index)
         magtag.set_text(forecast_str, content_index)
-    
+    elif current_view == "news":
+        magtag.set_text("News Headlines", header_index)
+        magtag.set_text(news_str, content_index)
+
     magtag.refresh()
 
 # -------------------------------------------------
 # Main Program Flow
 # -------------------------------------------------
 def main():
-    global current_view, weather_str, forecast_str, last_weather_update, last_forecast_update
-    
+    global current_view, weather_str, forecast_str, news_str
+    global last_weather_update, last_forecast_update, last_news_update
+
     # 1. Connect to Wi-Fi
     connect_to_wifi()
-    
+
     # 2. Sync time
     pool = socketpool.SocketPool(wifi.radio)
     sync_time(pool)
-    
+
     # 3. Create HTTP session
     session = adafruit_requests.Session(pool, ssl.create_default_context())
-    
+
     # 4. Initial data fetch
     weather_data = fetch_weather(session, CITY, secret.OPENWEATHERMAP_API_KEY)
     forecast_data = fetch_forecast(session, CITY, secret.OPENWEATHERMAP_API_KEY)
     weather_str = format_weather(weather_data, CITY)
     forecast_str = format_forecast(forecast_data)
+    news_str = fetch_headlines(session)
+
     update_display()
-    
+
     # 5. Main loop
     while True:
         current_time = time.monotonic()
-        
-        # Check for button press (leftmost button: Button A)
-        if not magtag.peripherals.buttons[0].value:  # Use index 0 for Button A
+
+        # --- Button Handling ---
+        # Button 0 (leftmost): toggle weather/forecast
+        if not magtag.peripherals.buttons[0].value:
             current_view = "forecast" if current_view == "weather" else "weather"
             update_display()
-            time.sleep(0.5)  # Debounce
-        
+            time.sleep(0.5)  # debounce
+
+        # Button 1 (second from left): switch to news view
+        if not magtag.peripherals.buttons[1].value:
+            current_view = "news"
+            update_display()
+            time.sleep(0.5)  # debounce
+
+        # --- Timed Updates ---
         # Update weather every 5 minutes
         if current_time - last_weather_update >= WEATHER_UPDATE_INTERVAL:
             weather_data = fetch_weather(session, CITY, secret.OPENWEATHERMAP_API_KEY)
@@ -214,7 +304,7 @@ def main():
             if current_view == "weather":
                 update_display()
             last_weather_update = current_time
-        
+
         # Update forecast every 30 minutes
         if current_time - last_forecast_update >= FORECAST_UPDATE_INTERVAL:
             forecast_data = fetch_forecast(session, CITY, secret.OPENWEATHERMAP_API_KEY)
@@ -222,8 +312,15 @@ def main():
             if current_view == "forecast":
                 update_display()
             last_forecast_update = current_time
-        
-        time.sleep(0.1)  # Reduce sleep for responsive button presses
+
+        # Update news every 15 minutes
+        if current_time - last_news_update >= NEWS_UPDATE_INTERVAL:
+            news_str = fetch_headlines(session)
+            if current_view == "news":
+                update_display()
+            last_news_update = current_time
+
+        time.sleep(0.1)  # small sleep for responsive button presses
 
 # Run the program
 main()
