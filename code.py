@@ -124,7 +124,6 @@ def fetch_headlines(session):
                 current_length = len(w)
             else:
                 current_line.append(w)
-                # If not empty, add space length too
                 current_length += len(w) + (1 if current_line else 0)
 
         if current_line:
@@ -152,7 +151,7 @@ def fetch_headlines(session):
         for old_char, new_char in replace_map.items():
             headline = headline.replace(old_char, new_char)
 
-        # Wrap the text at ~28 characters
+        # Wrap the text at ~38 characters (adjust max_chars as needed)
         wrapped = wrap_text(headline, max_chars=38)
 
         # If it's not empty, store it
@@ -174,8 +173,9 @@ def format_weather(data, city):
     humidity = data["main"]["humidity"]
     wind_speed = round(data["wind"]["speed"])
 
-    sunrise = time.localtime(data["sys"]["sunrise"])
-    sunset = time.localtime(data["sys"]["sunset"])
+    # Adjust sunrise and sunset times by adding the timezone offset (in seconds)
+    sunrise = time.localtime(data["sys"]["sunrise"] + (TZ_OFFSET * 3600))
+    sunset = time.localtime(data["sys"]["sunset"] + (TZ_OFFSET * 3600))
 
     # Format sunrise time
     sunrise_time = "{}:{:02d} AM".format(sunrise.tm_hour, sunrise.tm_min)
