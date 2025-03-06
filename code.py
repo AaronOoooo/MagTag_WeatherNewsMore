@@ -31,9 +31,9 @@ last_weather_update = time.monotonic()
 last_forecast_update = time.monotonic()
 last_news_update = time.monotonic()
 
-# Initialize global variables for news headlines paging
-news_list = []  # Will store the fetched headlines
-news_page = 0   # 0 for first two headlines, 1 for the other two
+# Global variable for news headlines paging
+news_list = []  # Will store up to six headlines
+news_page = 0   # 0: headlines 0-1, 1: headlines 2-3, 2: headlines 4-5
 
 # -------------------------------------------------
 # Text Fields
@@ -88,7 +88,7 @@ def fetch_forecast(session, city, api_key):
 
 def fetch_headlines(session):
     """
-    Fetch the first four headlines from lite.cnn.com,
+    Fetch the first six headlines from lite.cnn.com,
     replace unsupported glyphs, and wrap long lines.
     Returns a list of headlines.
     """
@@ -117,7 +117,6 @@ def fetch_headlines(session):
         current_length = 0
 
         for w in words:
-            # +1 accounts for a space if there's already text in the line
             if current_length + len(w) + (1 if current_line else 0) > max_chars:
                 lines.append(" ".join(current_line))
                 current_line = [w]
@@ -125,7 +124,6 @@ def fetch_headlines(session):
             else:
                 current_line.append(w)
                 current_length += len(w) + (1 if current_line else 0)
-
         if current_line:
             lines.append(" ".join(current_line))
         return "\n".join(lines)
@@ -142,22 +140,16 @@ def fetch_headlines(session):
             continue
 
         headline = part[anchor_close+1:anchor_end].strip()
-
-        # Skip any “terms” or “privacy” text
         if "Terms" in headline or "Privacy" in headline:
             continue
 
-        # Replace curly quotes, dashes, etc.
         for old_char, new_char in replace_map.items():
             headline = headline.replace(old_char, new_char)
 
-        # Wrap the text at ~38 characters (adjust max_chars as needed)
         wrapped = wrap_text(headline, max_chars=38)
-
         if len(wrapped) > 5:
             headlines.append(wrapped)
-
-        if len(headlines) >= 4:
+        if len(headlines) >= 6:
             break
 
     return headlines
@@ -175,9 +167,7 @@ def format_weather(data, city):
     sunrise = time.localtime(data["sys"]["sunrise"] + (TZ_OFFSET * 3600))
     sunset = time.localtime(data["sys"]["sunset"] + (TZ_OFFSET * 3600))
 
-    # Format sunrise time
     sunrise_time = "{}:{:02d} AM".format(sunrise.tm_hour, sunrise.tm_min)
-    # Convert sunset hour to 12-hour format
     sunset_hour_12 = sunset.tm_hour - 12 if sunset.tm_hour > 12 else sunset.tm_hour
     if sunset_hour_12 == 0:
         sunset_hour_12 = 12
@@ -236,8 +226,8 @@ def format_datetime(now):
 
 def update_display():
     """Refresh the screen based on current view."""
-    magtag.set_text("", header_index)  # Clear header
-    magtag.set_text("", content_index)   # Clear content
+    magtag.set_text("", header_index)
+    magtag.set_text("", content_index)
 
     if current_view == "weather":
         magtag.set_text(format_datetime(time.localtime()), header_index)
@@ -247,16 +237,12 @@ def update_display():
         magtag.set_text(forecast_str, content_index)
     elif current_view == "news":
         magtag.set_text("News Headlines", header_index)
-        # Display headlines based on the current news_page:
-        # If we have 4 or more headlines, split into two pages;
-        # Otherwise, display all available headlines.
-        if news_list and len(news_list) >= 4:
-            if news_page == 0:
-                display_news = "\n\n".join(news_list[0:2])
-            else:
-                display_news = "\n\n".join(news_list[2:4])
-        else:
-            display_news = "\n\n".join(news_list)
+        # Determine how many pages there are:
+        num_pages = max(1, (len(news_list) + 1) // 2)
+        # Compute start and end indices for the current page (2 headlines per page)
+        start_index = news_page * 2
+        end_index = start_index + 2
+        display_news = "\n\n".join(news_list[start_index:end_index])
         magtag.set_text(display_news, content_index)
 
     magtag.refresh()
@@ -268,17 +254,11 @@ def main():
     global current_view, weather_str, forecast_str, news_list, news_page
     global last_weather_update, last_forecast_update, last_news_update
 
-    # 1. Connect to Wi-Fi
     connect_to_wifi()
-
-    # 2. Sync time
     pool = socketpool.SocketPool(wifi.radio)
     sync_time(pool)
-
-    # 3. Create HTTP session
     session = adafruit_requests.Session(pool, ssl.create_default_context())
 
-    # 4. Initial data fetch
     weather_data = fetch_weather(session, CITY, secret.OPENWEATHERMAP_API_KEY)
     forecast_data = fetch_forecast(session, CITY, secret.OPENWEATHERMAP_API_KEY)
     weather_str = format_weather(weather_data, CITY)
@@ -288,31 +268,30 @@ def main():
 
     update_display()
 
-    # 5. Main loop
     while True:
         current_time = time.monotonic()
 
-        # --- Button Handling ---
         # Button 0 (leftmost): toggle weather/forecast view
         if not magtag.peripherals.buttons[0].value:
             current_view = "forecast" if current_view == "weather" else "weather"
             update_display()
-            time.sleep(0.5)  # debounce
+            time.sleep(0.5)
 
-        # Button 1 (second from left): switch to news view
+        # Button 1 (second from left): switch to news view or cycle through news pages
         if not magtag.peripherals.buttons[1].value:
-            current_view = "news"
+            if current_view != "news":
+                current_view = "news"
+                news_page = 0  # Start with the first two headlines
+            else:
+                # Cycle to the next page of headlines
+                num_pages = max(1, (len(news_list) + 1) // 2)
+                news_page = (news_page + 1) % num_pages
             update_display()
-            time.sleep(0.5)  # debounce
+            time.sleep(0.5)
 
-        # Button 2 (third from left): if in news view, toggle news page
-        if current_view == "news" and not magtag.peripherals.buttons[2].value:
-            news_page = 1 - news_page  # Toggle between 0 and 1
-            update_display()
-            time.sleep(0.5)  # debounce
+        # (Button 2 currently has no functionality)
 
-        # --- Timed Updates ---
-        # Update weather every 5 minutes
+        # Timed updates
         if current_time - last_weather_update >= WEATHER_UPDATE_INTERVAL:
             weather_data = fetch_weather(session, CITY, secret.OPENWEATHERMAP_API_KEY)
             weather_str = format_weather(weather_data, CITY)
@@ -320,7 +299,6 @@ def main():
                 update_display()
             last_weather_update = current_time
 
-        # Update forecast every 30 minutes
         if current_time - last_forecast_update >= FORECAST_UPDATE_INTERVAL:
             forecast_data = fetch_forecast(session, CITY, secret.OPENWEATHERMAP_API_KEY)
             forecast_str = format_forecast(forecast_data)
@@ -328,14 +306,13 @@ def main():
                 update_display()
             last_forecast_update = current_time
 
-        # Update news every 15 minutes
         if current_time - last_news_update >= NEWS_UPDATE_INTERVAL:
             news_list = fetch_headlines(session)
             if current_view == "news":
                 update_display()
             last_news_update = current_time
 
-        time.sleep(0.1)  # small sleep for responsive button presses
+        time.sleep(0.1)
 
 # Run the program
 main()
