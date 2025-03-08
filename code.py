@@ -9,54 +9,66 @@ import adafruit_ntp
 from rtc import RTC
 
 # Import secret configuration (WiFi credentials, API keys) and the MagTag library.
-import secret  # Contains OPENWEATHERMAP_API_KEY, WIFI_SSID, WIFI_PASSWORD
+import secret  # Contains OPENWEATHERMAP_API_KEY, WIFI_SSID, WIFI_PASSWORD, ALPHAVANTAGE_API_KEY
 from adafruit_magtag.magtag import MagTag
 
 # -------------------------------------------------
 # Configuration Constants
 # -------------------------------------------------
-CITY = "Chicago"               # City name for weather queries
+CITY = "Chicago"               # City for weather queries
 TZ_OFFSET = -6                 # Time zone offset (CST is UTC-6)
 TIME_UPDATE_INTERVAL = 60      # Update time every 60 seconds
 WEATHER_UPDATE_INTERVAL = 300  # Update weather every 5 minutes
 FORECAST_UPDATE_INTERVAL = 1800  # Update forecast every 30 minutes
 NEWS_UPDATE_INTERVAL = 900     # Update news every 15 minutes (900 seconds)
+STOCK_UPDATE_INTERVAL = 3600   # Update stocks at the top of every hour
+
+# Define stock groups.
+STOCKS_GROUP_1 = ["DJIA", "IXIC", "SPX"]
+STOCKS_GROUP_2 = ["WMT", "GOOG", "V", "BDX", "META"]
 
 # -------------------------------------------------
 # Initialize MagTag and Global Variables
 # -------------------------------------------------
 magtag = MagTag()              # Create a MagTag object
 
-# Set initial view mode: "weather" by default.
+# Set initial view mode: "weather", "forecast", "news", or "stocks".
 current_view = "weather"
 
-# Time markers for last updates (using time.monotonic for elapsed time measurement).
+# Time markers for periodic updates.
 last_weather_update = time.monotonic()
 last_forecast_update = time.monotonic()
 last_news_update = time.monotonic()
+last_stock_update = 0  # Will update stock data at the top of every hour.
 
-# Global variable to hold fetched news headlines.
-# We'll fetch up to six headlines. These will be paged two-at-a-time.
+# Global variable for news headlines paging.
 news_list = []   
-news_page = 0  # News page: 0 means headlines 0-1, 1 means headlines 2-3, and 2 means headlines 4-5
+news_page = 0  # 0: headlines 0-1, 1: headlines 2-3, 2: headlines 4-5
+
+# Global dictionary for stock data.
+stock_data = {}  # Keys: ticker symbols; Values: dict with "price", "change", "change_percent".
+
+# Global variable to hold the formatted time when stock data was last fetched.
+last_stock_time_str = "N/A"
+
+# Global variable for stocks page (0: Group 1, 1: Group 2).
+stocks_page = 0
 
 # -------------------------------------------------
 # Setup Display Text Fields
 # -------------------------------------------------
-# Header text (e.g., for displaying the current time or titles).
 header_index = magtag.add_text(
-    text_font="/fonts/Arial-Bold-12.bdf",  # Bold font for headers
-    text_position=(5, 0),                  # X and Y position on the display
-    text_color=0x000000,                   # Black text
+    text_font="/fonts/Arial-Bold-12.bdf",  # Bold font for headers/date-time.
+    text_position=(5, 0),                  # Position at the top.
+    text_color=0x000000,                   # Black text.
 )
 
-# Content text (e.g., for weather details, forecasts, or news headlines).
 content_index = magtag.add_text(
-    text_font="/fonts/Arial-12.bdf",       # Regular font for body text
-    text_position=(5, 60),                 # Position below the header
-    text_color=0x000000,                   # Black text
-    line_spacing=0.7,                      # Adjust line spacing as desired
-    # text_wrap=28,  # Uncomment to let the library handle text wrapping automatically
+    text_font="/fonts/Arial-12.bdf",       # Regular font for content.
+    text_position=(5, 60),                 # Positioned below the header.
+    text_color=0x000000,                   # Black text.
+    line_spacing=0.7,                      # Tighter line spacing.
+    # text_wrap=28,  # Uncomment to let the library handle text wrapping.
 )
 
 # -------------------------------------------------
@@ -70,14 +82,14 @@ def connect_to_wifi():
     print("Connected!")
 
 def sync_time(pool):
-    """Synchronizes the real-time clock via an NTP server using the provided time zone offset."""
+    """Synchronizes the real-time clock via NTP using the provided time zone offset."""
     print("Syncing time...")
     ntp = adafruit_ntp.NTP(pool, tz_offset=TZ_OFFSET)
     RTC().datetime = ntp.datetime  # Set RTC to current NTP time
     print("Time synced!")
 
 def fetch_weather(session, city, api_key):
-    """Fetches the current weather from OpenWeatherMap for the given city."""
+    """Fetches current weather data from OpenWeatherMap for the given city."""
     url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=imperial"
     print("Fetching weather...")
     response = session.get(url)
@@ -96,9 +108,9 @@ def fetch_forecast(session, city, api_key):
 
 def fetch_headlines(session):
     """
-    Fetches up to six headlines from lite.cnn.com.
-    This function replaces unsupported glyphs with ASCII equivalents,
-    wraps long headlines, and returns a list of formatted headlines.
+    Fetches up to six news headlines from lite.cnn.com.
+    Replaces unsupported glyphs with ASCII equivalents, wraps long headlines,
+    and returns a list of formatted headlines.
     """
     url = "https://lite.cnn.com/en"
     print("Fetching headlines from lite.cnn.com...")
@@ -106,7 +118,7 @@ def fetch_headlines(session):
     html = response.text
     response.close()
 
-    # Dictionary for replacing curly quotes and other fancy punctuation with plain ASCII.
+    # Dictionary for replacing fancy punctuation with plain ASCII.
     replace_map = {
         "’": "'",
         "‘": "'",
@@ -118,16 +130,12 @@ def fetch_headlines(session):
     }
 
     def wrap_text(text, max_chars=38):
-        """
-        Wraps a string so that each line does not exceed max_chars.
-        Returns the wrapped text with newline characters.
-        """
+        """Wraps a string so that each line does not exceed max_chars."""
         words = text.split()
         lines = []
         current_line = []
         current_length = 0
         for w in words:
-            # If adding the next word exceeds max_chars, start a new line.
             if current_length + len(w) + (1 if current_line else 0) > max_chars:
                 lines.append(" ".join(current_line))
                 current_line = [w]
@@ -140,7 +148,6 @@ def fetch_headlines(session):
         return "\n".join(lines)
 
     headlines = []
-    # Split HTML by list item tags.
     parts = html.split("<li ")
     for part in parts[1:]:
         if "<a href=" not in part:
@@ -150,14 +157,11 @@ def fetch_headlines(session):
         anchor_end = part.find("</a>", anchor_close)
         if anchor_close == -1 or anchor_end == -1:
             continue
-        # Extract the headline text.
         headline = part[anchor_close+1:anchor_end].strip()
         if "Terms" in headline or "Privacy" in headline:
             continue
-        # Replace any unsupported glyphs.
         for old_char, new_char in replace_map.items():
             headline = headline.replace(old_char, new_char)
-        # Wrap the headline text.
         wrapped = wrap_text(headline, max_chars=38)
         if len(wrapped) > 5:
             headlines.append(wrapped)
@@ -165,11 +169,84 @@ def fetch_headlines(session):
             break
     return headlines
 
+def fetch_stock_data(session):
+    """
+    Fetches stock data for specified ticker symbols from Alpha Vantage's Global Quote endpoint.
+    Updates the global 'stock_data' dictionary with the latest price, change, and change percent.
+    Also updates 'last_stock_time_str' with the current time in the format:
+      "h:mm pm Weekday" (e.g., "1:04 pm Monday").
+    """
+    global stock_data, last_stock_time_str
+    # Combine symbols from both groups (remove duplicates)
+    symbols = list(set(STOCKS_GROUP_1 + STOCKS_GROUP_2))
+    for symbol in symbols:
+        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={secret.ALPHAVANTAGE_API_KEY}"
+        try:
+            response = session.get(url)
+            data = response.json()
+            response.close()
+            quote = data.get("Global Quote", {})
+            price = quote.get("05. price", "N/A")
+            change = quote.get("09. change", "0")
+            change_percent = quote.get("10. change percent", "0%")
+            stock_data[symbol] = {
+                "price": price,
+                "change": change,
+                "change_percent": change_percent
+            }
+            print(f"Fetched stock data for {symbol}: {stock_data[symbol]}")
+        except Exception as e:
+            print(f"Error fetching stock data for {symbol}: {e}")
+    # Update the last stock retrieval time using our custom format.
+    last_stock_time_str = format_stock_time(time.localtime())
+
+def format_stock_time(now):
+    """
+    Returns the current time in the format "h:mm pm Weekday"
+    (e.g., "1:04 pm Monday") using 12-hour time in CST.
+    """
+    hour = now.tm_hour % 12
+    if hour == 0:
+        hour = 12
+    minute = now.tm_min
+    am_pm = "am" if now.tm_hour < 12 else "pm"
+    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    weekday = weekday_names[now.tm_wday]
+    return f"{hour}:{minute:02d} {am_pm} {weekday}"
+
+def format_stock_view(group):
+    """
+    Formats stock information for a given group (list of ticker symbols) into a multi-line string.
+    Displays the symbol, current price, change, and change percent, formatted to two decimals.
+    Ticker symbols are sorted alphabetically.
+    """
+    lines = []
+    for symbol in sorted(group):
+        info = stock_data.get(symbol, {})
+        try:
+            price = float(info.get("price", 0))
+            price_str = f"{price:.2f}"
+        except:
+            price_str = "N/A"
+        try:
+            change = float(info.get("change", 0))
+            change_str = f"{change:.2f}"
+        except:
+            change_str = "0.00"
+        cp = info.get("change_percent", "0%")
+        try:
+            cp_val = float(cp.strip('%'))
+            cp_str = f"{cp_val:.2f}%"
+        except:
+            cp_str = "0.00%"
+        line = f"{symbol}: ${price_str}  {change_str} ({cp_str})"
+        lines.append(line)
+    return "\n".join(lines)
+
 def format_weather(data, city):
     """
     Formats current weather data into a multi-line string.
-    Temperatures are rounded to whole numbers.
-    Adjusts sunrise and sunset times using the configured time zone offset.
+    Rounds temperatures and adjusts sunrise/sunset times using TZ_OFFSET.
     """
     temp = round(data["main"]["temp"])
     temp_max = round(data["main"]["temp_max"])
@@ -177,18 +254,14 @@ def format_weather(data, city):
     feels_like = round(data["main"]["feels_like"])
     humidity = data["main"]["humidity"]
     wind_speed = round(data["wind"]["speed"])
-    
-    # Convert UTC timestamps to local time by adding the offset in seconds.
     sunrise = time.localtime(data["sys"]["sunrise"] + (TZ_OFFSET * 3600))
     sunset = time.localtime(data["sys"]["sunset"] + (TZ_OFFSET * 3600))
     sunrise_time = "{}:{:02d} AM".format(sunrise.tm_hour, sunrise.tm_min)
-    # Convert sunset time to 12-hour format.
     sunset_hour_12 = sunset.tm_hour - 12 if sunset.tm_hour > 12 else sunset.tm_hour
     if sunset_hour_12 == 0:
         sunset_hour_12 = 12
     sunset_am_pm = "PM" if sunset.tm_hour >= 12 else "AM"
     sunset_time = "{}:{:02d} {}".format(sunset_hour_12, sunset.tm_min, sunset_am_pm)
-    
     return (
         "Weather in {}: {}°F\n".format(city, temp) +
         "High: {}°F, Low: {}°F\n".format(temp_max, temp_min) +
@@ -199,8 +272,7 @@ def format_weather(data, city):
 
 def format_forecast(data):
     """
-    Formats the 5-day forecast into a multi-line string.
-    Uses every 8th data point (approx. one per day).
+    Formats a 5-day forecast into a multi-line string by selecting every 8th data point.
     """
     forecast_str = ""
     weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -235,65 +307,76 @@ def format_datetime(now):
 
 def update_display():
     """
-    Updates the MagTag display based on the current view.
-    Also sets the NeoPixel LED indicators as follows:
-      - Weather view: Right-most LED (LED 3) is lit white.
-      - Forecast view: Right-most LED (LED 3) is lit blue.
-      - News view: Second from right LED (LED 2) is lit with a color based on the current news page:
-                  white for page 0, green for page 1, and orange for page 2.
+    Refreshes the MagTag display based on the current view and updates the NeoPixel LEDs.
+    
+    LED Indicators:
+      - **Weather/Forecast view:** The right-most LED (LED 3) is lit white (weather) or blue (forecast).
+      - **News view:** The second-from-right LED (LED 2) is lit based on the news page:
+                      white for page 0, green for page 1, and orange for page 2.
+      - **Stocks view:** The header shows "Stock info as of <time>" and the left-most LED (LED 0) lights purple.
     """
     magtag.set_text("", header_index)
     magtag.set_text("", content_index)
     
-    # Clear the specific LEDs used for indication.
-    # For this configuration, we assume:
-    #   LED 3 is the right-most LED.
-    #   LED 2 is the second from the right.
+    # Clear the LEDs used for indication.
+    # LED 3: Right-most, LED 2: Second-from-right, LED 0: Left-most.
     magtag.peripherals.neopixels[3] = (0, 0, 0)
     magtag.peripherals.neopixels[2] = (0, 0, 0)
+    magtag.peripherals.neopixels[0] = (0, 0, 0)
     
     if current_view == "weather":
         magtag.set_text(format_datetime(time.localtime()), header_index)
         magtag.set_text(weather_str, content_index)
-        # Light the right-most LED (LED 3) white in weather view.
+        # In weather view, light the right-most LED (LED 3) white.
         magtag.peripherals.neopixels[3] = (255, 255, 255)
     elif current_view == "forecast":
         magtag.set_text("5-Day Forecast", header_index)
         magtag.set_text(forecast_str, content_index)
-        # Light the right-most LED (LED 3) blue in forecast view.
+        # In forecast view, light the right-most LED (LED 3) blue.
         magtag.peripherals.neopixels[3] = (0, 0, 255)
     elif current_view == "news":
         magtag.set_text("News Headlines", header_index)
-        # Determine which two headlines to display based on the current news page.
         start_index = news_page * 2
         end_index = start_index + 2
         display_news = "\n\n".join(news_list[start_index:end_index])
         magtag.set_text(display_news, content_index)
-        # In news view, do not light the right-most LED.
-        magtag.peripherals.neopixels[3] = (0, 0, 0)
-        # Light the second from right LED (LED 2) based on news_page:
+        # In news view, light the second-from-right LED (LED 2) based on news_page.
         if news_page == 0:
             magtag.peripherals.neopixels[2] = (255, 255, 255)  # white
         elif news_page == 1:
             magtag.peripherals.neopixels[2] = (0, 255, 0)      # green
         elif news_page == 2:
             magtag.peripherals.neopixels[2] = (255, 165, 0)    # orange
+    elif current_view == "stocks":
+        # Set header with last stock retrieval time in format "Stock info as of h:mm pm Weekday".
+        header_text = "Stock info as of " + last_stock_time_str
+        magtag.set_text(header_text, header_index)
+        # Select stock group based on stocks_page.
+        if stocks_page == 0:
+            group = STOCKS_GROUP_1
+        else:
+            group = STOCKS_GROUP_2
+        display_stocks = format_stock_view(group)
+        magtag.set_text(display_stocks, content_index)
+        # In stocks view, light the left-most LED (LED 0) purple.
+        magtag.peripherals.neopixels[0] = (128, 0, 128)
     magtag.refresh()
 
 def main():
     """
     Main function:
       - Connects to Wi-Fi and synchronizes time.
-      - Fetches weather, forecast, and news data.
-      - Enters a loop to update the display and cycle between different views
-        based on button presses.
+      - Fetches weather, forecast, news, and stock data.
+      - Checks for button presses to switch views.
+      - Performs periodic updates.
     """
     global current_view, weather_str, forecast_str, news_list, news_page
-    global last_weather_update, last_forecast_update, last_news_update
+    global last_weather_update, last_forecast_update, last_news_update, last_stock_update
+    global stock_data, stocks_page, last_stock_time_str
 
-    connect_to_wifi()  # Connect to Wi-Fi
+    connect_to_wifi()  # Connect to Wi-Fi.
     pool = socketpool.SocketPool(wifi.radio)
-    sync_time(pool)    # Synchronize time with NTP
+    sync_time(pool)    # Synchronize time with NTP.
     session = adafruit_requests.Session(pool, ssl.create_default_context())
 
     # Fetch initial weather, forecast, and news data.
@@ -302,35 +385,50 @@ def main():
     weather_str = format_weather(weather_data, CITY)
     forecast_str = format_forecast(forecast_data)
     news_list = fetch_headlines(session)
-    news_page = 0  # Start by displaying the first two headlines
+    news_page = 0  # Start with the first two headlines.
 
-    update_display()  # Update the display with the initial data
+    # Fetch initial stock data.
+    stock_data = {}
+    stocks_page = 0  # 0: Group 1 (DJIA, IXIC, SPX), 1: Group 2 (WMT, GOOG, V, BDX, META).
+    fetch_stock_data(session)
+    last_stock_update = time.monotonic()
 
-    # Main loop to update the display based on button presses and timed updates.
+    update_display()  # Update the display with initial data.
+
     while True:
         current_time = time.monotonic()
+        local_time = time.localtime()
 
-        # Button 0 (left-most button) toggles between weather and forecast views.
+        # Button 0 (left-most): Toggle between weather and forecast views.
         if not magtag.peripherals.buttons[0].value:
             current_view = "forecast" if current_view == "weather" else "weather"
             update_display()
-            time.sleep(0.5)  # Debounce delay
+            time.sleep(0.5)
 
-        # Button 1 (second from left) switches to news view or cycles through news pages.
+        # Button 1 (second from left): Switch to news view or cycle through news pages.
         if not magtag.peripherals.buttons[1].value:
             if current_view != "news":
                 current_view = "news"
-                news_page = 0  # Start with first set of news headlines
+                news_page = 0
             else:
                 num_pages = max(1, (len(news_list) + 1) // 2)
-                news_page = (news_page + 1) % num_pages  # Cycle through news pages
+                news_page = (news_page + 1) % num_pages
             update_display()
             time.sleep(0.5)
 
-        # Button 2 (third from left) currently has no functionality.
-        # (Placeholder for future features.)
+        # Button 2 (third from left): Switch to stocks view or toggle between stock pages.
+        if not magtag.peripherals.buttons[2].value:
+            if current_view != "stocks":
+                current_view = "stocks"
+                stocks_page = 0
+            else:
+                stocks_page = 1 - stocks_page  # Toggle between 0 and 1.
+            update_display()
+            time.sleep(0.5)
 
-        # Periodic updates for weather, forecast, and news.
+        # Button 3 (fourth from left): Currently no functionality.
+
+        # Periodic updates:
         if current_time - last_weather_update >= WEATHER_UPDATE_INTERVAL:
             weather_data = fetch_weather(session, CITY, secret.OPENWEATHERMAP_API_KEY)
             weather_str = format_weather(weather_data, CITY)
@@ -351,7 +449,14 @@ def main():
                 update_display()
             last_news_update = current_time
 
-        time.sleep(0.1)  # Small delay for responsiveness
+        # Update stock data at the top of every hour.
+        if local_time.tm_min == 0 and (current_time - last_stock_update) >= STOCK_UPDATE_INTERVAL:
+            fetch_stock_data(session)
+            if current_view == "stocks":
+                update_display()
+            last_stock_update = current_time
 
-# Run the main function
+        time.sleep(0.1)
+
+# Run the main function.
 main()
